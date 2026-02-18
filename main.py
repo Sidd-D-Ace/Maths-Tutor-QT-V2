@@ -821,6 +821,15 @@ class MainWindow(QMainWindow):
         
     def back_to_home(self):
         """Switch to the home menu page."""
+        # ✅ CONTEXT-AWARE FIX: 
+        # If we are currently in an "Uploaded Quiz" (which is a raw QuestionWidget instance directly on stack),
+        # we should go back to Mode Selection (Main Menu), NOT Learning Menu.
+        if isinstance(self.stack.currentWidget(), QuestionWidget):
+            self.back_to_main_menu()
+            return
+
+        # ✅ STANDARD LOGIC:
+        # For standard learning modes (Story, Time, etc.), go back to Learning Menu.
         self.top_bar.show()  # Restore theme toggle on menu
         # Stop any activity in the current widget (like the bell timer)
         current_page = self.stack.currentWidget()
