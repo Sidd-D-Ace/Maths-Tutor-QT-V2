@@ -208,7 +208,7 @@ class MainWindow(QMainWindow):
         Rebuilds the entire UI with the new language WITHOUT closing the window.
         """
         print(f"[System] Refreshing UI to {new_language}...")
-        
+
         # 1. Update the language variable
         self.language = new_language
         self.setWindowTitle(f"Maths Tutor - {self.language}")
@@ -216,12 +216,12 @@ class MainWindow(QMainWindow):
         # 2. Stop any active components from the OLD UI
         if hasattr(self, 'tts'):
             self.tts.stop()
-        
+
         # 3. Re-run init_ui
-        # This creates a brand new Central Widget. 
+        # This creates a brand new Central Widget.
         # When we set it, PyQt automatically destroys the OLD central widget (and all its children).
         self.init_ui()
-        
+
         # 4. Re-apply the current theme to the new widgets
         from pages.shared_ui import apply_theme
         apply_theme(self.central_widget, self.current_theme)
@@ -283,7 +283,7 @@ class MainWindow(QMainWindow):
         menu_layout.addSpacing(10)
         menu_layout.addStretch()
 
-        # GIF Section 
+        # GIF Section
         self.gif_label = QLabel()
         self.gif_label.setAlignment(Qt.AlignCenter)
         # ✅ ACCESSIBILITY: Mark decorative animation as hidden from screen readers
@@ -315,7 +315,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.startup_widget)  # index 0
 
     # Create the home menu page
-        
+
         self.stack.addWidget(self.menu_widget)     # index 1
 
 # Show the startup (mode selection) page first
@@ -325,6 +325,7 @@ class MainWindow(QMainWindow):
         self.main_layout.addWidget(self.stack)
 
 # Create the footers
+        self.audio_buttons_list = [] # Reset list when recreating UI
         self.main_footer = create_main_footer_buttons(self)   # For startup & home
         self.section_footer = self.create_section_footer()     # For sections only
 
@@ -338,7 +339,7 @@ class MainWindow(QMainWindow):
         self.main_layout.addWidget(self.section_footer)
 
         # Show main footer initially, hide section footer
-    
+
         self.section_footer.hide()
 
         # ✅ Hide "Back to Menu" on startup page — there's nowhere to go back to
@@ -349,7 +350,7 @@ class MainWindow(QMainWindow):
 
         apply_theme(self.central_widget, self.current_theme)
 
-            
+
         # ensure Story button & Quickplay button gets focus on UI load
         self.focus_story_button()
         self.focus_quickplay_button()
@@ -361,7 +362,7 @@ class MainWindow(QMainWindow):
             if btn.text() == tr("Story"):
                 btn.setFocus()
                 break
-            
+
     def focus_quickplay_button(self):
         """✅ Ensure Quick Play button is focused on mode selection page"""
         if hasattr(self, "quickPlayButton") and self.quickPlayButton:
@@ -377,7 +378,7 @@ class MainWindow(QMainWindow):
         label = QLabel("Choose Mode")
         label.setAlignment(Qt.AlignCenter)
         label.setProperty("class", "main-title")
-        
+
         # ✅ ACCESSIBILITY: Ensure this header is read when navigating
         label.setAccessibleName("Choose Mode Menu")
         layout.addWidget(label)
@@ -393,14 +394,14 @@ class MainWindow(QMainWindow):
             btn.setProperty("class", "menu-button")
             btn.setProperty("theme", self.current_theme)
             btn.clicked.connect(callback)
-            
+
             # ✅ ACCESSIBILITY: Clean up text for readers (remove emojis if they sound weird)
             clean_text = text.replace("⚡", "").replace("🎮", "").replace("🎓", "").strip()
             btn.setAccessibleName(clean_text)
             btn.setAccessibleDescription(f"Start {clean_text}")
-            
+
             layout.addWidget(btn)
-            
+
             if "Quickplay" in text:
                 self.quickPlayButton = btn
 
@@ -575,18 +576,18 @@ class MainWindow(QMainWindow):
 
 
     def play_sound(self, filename):
-        
+
         if self.is_muted:
             print("[SOUND] Muted, not playing:", filename)
             return
-        
+
         filepath = os.path.abspath(os.path.join("sounds", filename))
         if os.path.exists(filepath):
             self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(filepath)))
             self.media_player.play()
         else:
             print(f"[SOUND ERROR] File not found: {filepath}")
-    
+
     # In main.py -> MainWindow class
 
     def play_background_music(self):
@@ -597,10 +598,10 @@ class MainWindow(QMainWindow):
         filepath = os.path.abspath(os.path.join("sounds", "backgroundmusic.mp3"))
         if os.path.exists(filepath):
             self.bg_player.setMedia(QMediaContent(QUrl.fromLocalFile(filepath)))
-            
+
             # ✅ REDUCED VOLUME: Set to 10 (Was 30)
             self.bg_player.setVolume(10)
-            
+
             self.bg_player.play()
             # BUG FIX: Only connect the loop signal once to avoid duplicate connections
             if not getattr(self, '_bg_loop_connected', False):
@@ -614,19 +615,27 @@ class MainWindow(QMainWindow):
         if status == QMediaPlayer.EndOfMedia:
             self.bg_player.setPosition(0)
             self.bg_player.play()
-    
+
     def create_audio_button(self):
-        self.audio_button = QPushButton("🔊")
-        self.audio_button.setObjectName("audio-button")
-        self.audio_button.setToolTip("Toggle Mute/Unmute")
-        self.audio_button.clicked.connect(self.toggle_audio)
-        self.audio_button.setProperty("class", "footer-button")
+        # Create a new button instance
+        btn = QPushButton("🔊" if not self.is_muted else "🔇") # Initialize with correct icon
+        btn.setObjectName("audio-button")
+        btn.setToolTip("Toggle Mute/Unmute")
+        btn.clicked.connect(self.toggle_audio)
+        btn.setProperty("class", "footer-button")
         # ✅ Make sure it can receive focus by Tab
-        self.audio_button.setFocusPolicy(Qt.StrongFocus)
+        btn.setFocusPolicy(Qt.StrongFocus)
         # ✅ ACCESSIBILITY: Give meaningful name for screen readers
-        self.audio_button.setAccessibleName("Audio Unmuted")
-        self.audio_button.setAccessibleDescription("Toggle mute and unmute for sounds and music")
-        return self.audio_button
+        state_text = "Audio Muted" if self.is_muted else "Audio Unmuted"
+        btn.setAccessibleName(state_text)
+        btn.setAccessibleDescription("Toggle mute and unmute for sounds and music")
+
+        # Track this button for synchronization
+        if not hasattr(self, 'audio_buttons_list'):
+            self.audio_buttons_list = []
+        self.audio_buttons_list.append(btn)
+
+        return btn
 
     def set_mute(self, state: bool):
         self.is_muted = state
@@ -640,15 +649,22 @@ class MainWindow(QMainWindow):
     def toggle_audio(self):
         new_state = not self.is_muted
         self.set_mute(new_state)
-        self.audio_button.setText("🔇" if new_state else "🔊")
-        # ✅ ACCESSIBILITY: Update accessible name to reflect current state
-        self.audio_button.setAccessibleName("Audio Muted" if new_state else "Audio Unmuted")
-        print("[AUDIO]", "Muted" if new_state else "Unmuted")
-        
 
-      
+        # Sync all registered audio buttons
+        if hasattr(self, 'audio_buttons_list'):
+            # Filter out deleted/garbage collected buttons if any (though PyQt usually handles cleanup, safe to be sure)
+            self.audio_buttons_list = [btn for btn in self.audio_buttons_list if not sip.isdeleted(btn)]
+
+            for btn in self.audio_buttons_list:
+                btn.setText("🔇" if new_state else "🔊")
+                # ✅ ACCESSIBILITY: Update accessible name to reflect current state
+                btn.setAccessibleName("Audio Muted" if new_state else "Audio Unmuted")
+
+        print("[AUDIO]", "Muted" if new_state else "Unmuted")
+
+
     def create_buttons(self):
-        button_grid = QGridLayout() 
+        button_grid = QGridLayout()
         button_grid.setSpacing(12)
         button_grid.setContentsMargins(6, 6, 6, 6)
 
@@ -672,14 +688,12 @@ class MainWindow(QMainWindow):
         # 🔁 Calculate next available row dynamically
         next_row = (len(sections) + 2) // 3
 
-        
+
 
         return button_grid
-    
-    
 
 
-    
+
 
     def create_section_footer(self):
         buttons = ["Back to Operations", "Back to Home", "Settings"]
@@ -694,6 +708,10 @@ class MainWindow(QMainWindow):
 
         # Create the footer with translated labels and callbacks
         footer = create_footer_buttons(translated, callbacks=callbacks)
+
+        # ✅ INSERT AUDIO BUTTON TO SECTION FOOTER
+        audio_btn = self.create_audio_button()
+        footer.layout().insertWidget(0, audio_btn, alignment=Qt.AlignLeft)
 
         # ✅ Assign objectName for visibility toggling (very important!)
         for btn in footer.findChildren(QPushButton):

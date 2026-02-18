@@ -359,7 +359,10 @@ class QuestionWidget(QWidget):
         if self.main_window and not self.main_window.is_muted:
             app_tts_active = True
         
+        print(f"[DEBUG] load_new_question type: '{self.processor.questionType}'")
+
         if self.processor.questionType.lower() == "bellring":
+            print("[BellRing] Mode detected. Suppressing standard TTS.")
             app_tts_active = False
 
         if app_tts_active:
@@ -372,6 +375,16 @@ class QuestionWidget(QWidget):
                 else:
                     # Subsequent questions: immediate TTS
                     self.tts.speak(tts_text)
+                    
+        # --- Bell Ring Question Audio ---
+        if self.processor.questionType.lower() == "bellring":
+             # Delay slightly to allow UI to settle if it's the first question, 
+             # matching the TTS delay logic above
+             delay = 500 if self._question_count == 0 else 100
+             print(f"[BellRing] Scheduling sequence for: {question_text}")
+             QTimer.singleShot(delay, lambda: self.play_bell_question_sequence(question_text))
+             
+             # Also ensure input focus is set (handled below in original code)
 
         # Defer focus to input field — needs a short delay so the widget
         # is visible in the layout before focus can be set on it
@@ -380,17 +393,11 @@ class QuestionWidget(QWidget):
         self._question_count += 1
         # --- END ---
 
-        # Handle Bellring Logic
-        if self.processor.questionType.lower() == "bellring":
-            try:
-                count = int(float(self.answer))
-                if count > 0:
-                    self.play_bell_sounds(count)
-            except Exception as e:
-                print("[Bellring ERROR]", e)
-
+        # [REMOVED] Conflicting old Bellring answer logic
+        # Was: if self.processor.questionType.lower() == "bellring": ... play_bell_sounds(count)
    
     def play_bell_sounds(self, count):
+        # Legacy method kept just in case, but disconnected from load_new_question
         if not hasattr(self, "bell_timer"):
             self.bell_timer = QTimer(self)
             self.bell_timer.timeout.connect(self.do_ring)
@@ -401,6 +408,14 @@ class QuestionWidget(QWidget):
     def stop_all_activity(self):
         if hasattr(self, "bell_timer") and self.bell_timer.isActive():
             self.bell_timer.stop()
+        
+        # Stop Bell Sequence Timer (Phase 1 & 3)
+        if hasattr(self, "bell_seq_timer") and self.bell_seq_timer.isActive():
+            self.bell_seq_timer.stop()
+            
+        # Stop Sequence Wait Timer (Phase 2 -> 3 transition)
+        if hasattr(self, "seq_timer") and self.seq_timer.isActive():
+            self.seq_timer.stop()
 
     def do_ring(self):
         if self.current_ring < self.total_rings:
@@ -409,8 +424,10 @@ class QuestionWidget(QWidget):
         else:
             self.bell_timer.stop()
 
-
     def check_answer(self):
+            # ✅ Stop any ongoing bell sequences or audio immediately when user answers
+            self.stop_all_activity()
+
             user_input = self.input_box.text().strip()
             elapsed = time() - self.start_time
 
@@ -492,14 +509,107 @@ class QuestionWidget(QWidget):
                 if not self.input_box.hasFocus():
                     self.input_box.setFocus()
 
-       
-
+    
     def call_next_question(self):
         if hasattr(self, "next_question_callback") and self.next_question_callback:
             self.next_question_callback()
         else:
             self.load_new_question()
 
+    # --- Bell Ring Sequence Logic ---
+    def play_bell_question_sequence(self, question_text):
+        # Stop any existing sequence first
+        self.stop_all_activity()
+
+        print(f"[BellRing] processing sequence for: '{question_text}'")
+
+        import re
+        # Parse "3 + 2" or "3 + 2 =" or "3 + 2 = ?"
+        # Relaxed regex to handle optional spaces and optional equals/question mark
+        # Added 'x' and 'X' for multiplication support
+        match = re.search(r'(\d+)\s*([+\-*/×xX])\s*(\d+)', question_text)
+        
+        if not match:
+            print(f"[BellRing] Could not parse question for audio: '{question_text}' - Type: {self.processor.questionType}")
+            # Fallback to just reading it if parsing fails
+            if hasattr(self, 'tts') and self.tts: 
+                # Only fallback if we can't play bells, but user said "reads whole question" which is annoying if it's supposed to be bells
+                # Maybe fallback is OK, but let's log it.
+                self.tts.speak(question_text)
+            return
+
+        num1 = int(match.group(1))
+        op_char = match.group(2)
+        num2 = int(match.group(3))
+
+        op_map = {
+            '+': "Addition",
+            '-': "Subtraction",
+            '*': "Multiplication",
+            '×': "Multiplication",
+            'x': "Multiplication",
+            'X': "Multiplication",
+            '/': "Division",
+            '÷': "Division"
+        }
+        self.seq_op_text = op_map.get(op_char, "Operation")
+        self.seq_num2 = num2
+
+        print(f"[BellRing] Parsed: {num1} {op_char} {num2} -> {self.seq_op_text}")
+
+        # Start Sequence: Phase 1 (First Operand Bells)
+        self.play_bells_with_callback(num1, self._seq_phase_2_speak_op)
+
+    def _seq_phase_2_speak_op(self):
+        # Phase 2: Speak Operator
+        if hasattr(self, 'tts') and self.tts:
+            self.tts.speak(self.seq_op_text)
+        # Wait 1.5s for speech to finish, then Phase 3
+        # Use a single-shot timer that we can cancel if needed
+        self.seq_timer = QTimer(self)
+        self.seq_timer.setSingleShot(True)
+        self.seq_timer.timeout.connect(self._seq_phase_3_second_operand)
+        self.seq_timer.start(1500)
+
+    def _seq_phase_3_second_operand(self):
+        # Phase 3: Second Operand Bells
+        self.play_bells_with_callback(self.seq_num2, self._seq_phase_4_done)
+
+    def _seq_phase_4_done(self):
+        # Sequence complete
+        pass
+
+    def play_bells_with_callback(self, count, callback):
+        """Plays bell 'count' times, then calls 'callback'."""
+        
+        # Stop any existing bell sequence timer to prevent overlaps
+        if hasattr(self, "bell_seq_timer") and self.bell_seq_timer.isActive():
+            self.bell_seq_timer.stop()
+
+        if count <= 0:
+            if callback: callback()
+            return
+
+        self.bell_seq_counter = 0
+        self.bell_seq_total = count
+        self.bell_seq_callback = callback
+        
+        # Use a timer for the intervals
+        self.bell_seq_timer = QTimer(self)
+        self.bell_seq_timer.timeout.connect(self._on_bell_seq_tick)
+        self.bell_seq_timer.start(600) # 600ms gap between bells
+        
+        # Play first one immediately
+        self._on_bell_seq_tick() 
+
+    def _on_bell_seq_tick(self):
+        if self.bell_seq_counter < self.bell_seq_total:
+            QSound.play("sounds/click-button.wav")
+            self.bell_seq_counter += 1
+        else:
+            self.bell_seq_timer.stop()
+            if self.bell_seq_callback:
+                self.bell_seq_callback()
 
 
 def create_dynamic_question_ui(section_name, difficulty_index, back_callback,main_window=None, back_to_operations_callback=None, tts=None):
@@ -510,6 +620,11 @@ def create_dynamic_question_ui(section_name, difficulty_index, back_callback,mai
     layout = QVBoxLayout()
     layout.setAlignment(Qt.AlignTop)
     container.setLayout(layout)
+
+    # ✅ Temporary: Force difficulty to 1 for Bell Ring mode
+    if section_name.lower() == "bellring":
+        print(f"[BellRing] Overriding difficulty {difficulty_index} -> 1")
+        difficulty_index = 1
 
     processor = QuestionProcessor(section_name, difficulty_index)
     processor.process_file()
