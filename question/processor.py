@@ -4,8 +4,10 @@ import random
 
 
 class QuestionProcessor:
-    def __init__(self, questionType):
+    # ✅ Added difficultyIndex to match your shared_ui.py
+    def __init__(self, questionType, difficultyIndex=1):
         self.questionType = questionType
+        self.difficultyIndex = difficultyIndex
         self.df = None
         self.variables = []
         self.oprands = []
@@ -29,11 +31,11 @@ class QuestionProcessor:
         return self.replaceVariables(self.rowIndex, 0)
 
     def removeVariables(self, row, column):
-        val = self.df.iloc[row, column]
+        val = str(self.df.iloc[row, column]) # Wrapped in str() for safety
         return ''.join(c for c in val if not c.isalpha())
 
     def allVariables(self, row, column):
-        val = self.df.iloc[row, column]
+        val = str(self.df.iloc[row, column]) # Wrapped in str() for safety
         return [c for c in val if c.isalpha()]
 
     def parseInputRange(self, inputRange):
@@ -60,7 +62,34 @@ class QuestionProcessor:
         return int(inputRange)
 
     def replaceVariables(self, row, column):
-        val = self.df.iloc[row, column]
+        # ✅ Fetch the live selected language from your language module
+        import language.language as lang_module
+        current_language = lang_module.selected_language
+        
+        # Default to the English column header
+        target_col = self.df.columns[column]
+
+        # ✅ Map the selected language to the correct Excel column
+        if current_language == "हिंदी":
+            target_col = "question_hi"
+        elif current_language == "മലയാളം":
+            target_col = "question_mal"
+        elif current_language == "தமிழ்":
+            target_col = "question_ta"
+        elif current_language == "عربي":
+            target_col = "question_ar"
+        elif current_language == "संस्कृत":
+            target_col = "question_sa"
+
+        # Check if that translated column exists in your Excel file
+        if target_col in self.df.columns:
+            val = str(self.df.loc[row, target_col])
+        else:
+            # Fallback to English if the translation column is missing
+            print(f"[WARNING] '{target_col}' not found. Falling back to English.")
+            val = str(self.df.iloc[row, column])
+
+        # Replace variables like {a}, {b} with actual numbers
         for i, var in enumerate(self.variables):
             val = val.replace(f"{{{var}}}", str(self.oprands[i]))
         return val

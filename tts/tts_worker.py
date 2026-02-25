@@ -2,8 +2,12 @@ import platform
 import subprocess
 from PyQt5.QtCore import QObject, pyqtSignal, QThread, QTimer, QMutex
 
+import language.language as lang_config
+
 if platform.system() == "Windows":
     import pyttsx3
+    import win32com.client
+    import pythoncom
 
 class TTSWorker(QObject):
     finished = pyqtSignal()
@@ -15,10 +19,22 @@ class TTSWorker(QObject):
             self.engine = None
             self.timer = None
             self.iterating_lock = QMutex()
+            self.sapi = None  # Dedicated engine for Windows Modern (OneCore) voices
         else: # Linux
             self.process = None
 
     def speak(self, text):
+        current_lang = getattr(lang_config, 'selected_language', 'English')
+        
+        # ✅ NEW FIX: Convert standard numbers to Hindi Devanagari numerals
+        if current_lang == "हिंदी":
+            hindi_numerals = {
+                '0': '०', '1': '१', '2': '२', '3': '३', '4': '४', 
+                '5': '५', '6': '६', '7': '७', '8': '८', '9': '९'
+            }
+            for eng_num, hin_num in hindi_numerals.items():
+                text = text.replace(eng_num, hin_num)
+
         if self.system == "Windows":
             self._speak_windows(text)
         else:
@@ -41,6 +57,7 @@ class TTSWorker(QObject):
         if self.system == "Windows":
             self.engine = None
             self.timer = None
+            self.sapi = None
 
     # --- Windows Methods ---
     def _init_windows_engine(self):
@@ -52,7 +69,48 @@ class TTSWorker(QObject):
             self.timer.start(100)
 
     def _speak_windows(self, text):
+        current_lang = getattr(lang_config, 'selected_language', 'English')
+        
+        # ✅ Access the "Hidden" Windows 10/11 OneCore Voices directly!
+        if current_lang == "हिंदी":
+            try:
+                pythoncom.CoInitialize() # Required for COM in QThread
+                if not self.sapi:
+                    self.sapi = win32com.client.Dispatch("SAPI.SpVoice")
+                
+                # Tell SAPI to look in the Modern OneCore registry path instead of the Classic path
+                cat = win32com.client.Dispatch("SAPI.SpObjectTokenCategory")
+                cat.SetId(r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Speech_OneCore\Voices", False)
+                
+                hindi_voice = None
+                for token in cat.EnumerateTokens():
+                    desc = token.GetDescription().lower()
+                    if "hindi" in desc or "kalpana" in desc or "hemant" in desc:
+                        hindi_voice = token
+                        break
+                
+                if hindi_voice:
+                    self.sapi.Voice = hindi_voice
+                    self.sapi.Speak(text, 1) # 1 = Speak Asynchronously
+                    return  # Success! Skip the standard pyttsx3 code.
+            except Exception as e:
+                print("Native OneCore SAPI fallback failed:", e)
+
+        # ✅ STANDARD ENGLISH / FALLBACK PYTTSX3 LOGIC
         self._init_windows_engine()
+        voices = self.engine.getProperty('voices')
+        
+        target_voice = None
+        for voice in voices:
+            v_name = voice.name.lower()
+            v_id = voice.id.lower()
+            if current_lang != "हिंदी" and ("english" in v_name or "en-us" in v_id or "zira" in v_name or "david" in v_name):
+                target_voice = voice.id
+                break
+                
+        if target_voice:
+            self.engine.setProperty('voice', target_voice)
+
         self.engine.say(text)
         if not self.engine._inLoop:
             try:
@@ -66,12 +124,19 @@ class TTSWorker(QObject):
                 if self.engine:
                     self.engine.iterate()
             except (RuntimeError, TypeError):
-                # Seen on some systems when the loop is terminating
                 pass
             finally:
                 self.iterating_lock.unlock()
 
     def _stop_windows(self):
+        # Stop OneCore SAPI if active
+        if hasattr(self, 'sapi') and self.sapi:
+            try:
+                self.sapi.Speak("", 3) # 3 = Async + PurgeBeforeSpeak (Immediately cuts off speech)
+            except:
+                pass
+
+        # Stop pyttsx3 if active
         if self.engine and self.engine.isBusy():
             self.engine.stop()
 
@@ -84,13 +149,16 @@ class TTSWorker(QObject):
             except RuntimeError:
                 pass
         self.engine = None
+        self.sapi = None
 
     # --- Linux Methods ---
     def _speak_linux(self, text):
-        self._stop_linux() # Stop any previous speech
+        self._stop_linux()
         try:
-            # Use Popen to have control over the process
-            self.process = subprocess.Popen(['espeak-ng', text])
+            current_lang = getattr(lang_config, 'selected_language', 'English')
+            voice_arg = 'hi' if current_lang == "हिंदी" else 'en'
+            
+            self.process = subprocess.Popen(['espeak-ng', '-v', voice_arg, text])
         except FileNotFoundError:
             print("espeak-ng not found. Please install it.")
         except Exception as e:
@@ -107,7 +175,6 @@ class TTSWorker(QObject):
     
     def _cleanup_linux(self):
         self._stop_linux()
-
 
 class TextToSpeech(QObject):
     speak_signal = pyqtSignal(str)
