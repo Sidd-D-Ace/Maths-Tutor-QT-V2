@@ -4,13 +4,13 @@ from PyQt5.QtWidgets import ( QWidget, QLabel, QHBoxLayout, QPushButton,
                               QVBoxLayout,QSizePolicy, QDialog, QSlider, QDialogButtonBox
                               ,QSpacerItem,QLineEdit,QMessageBox,QApplication,QShortcut )
 
-from PyQt5.QtCore import Qt, QSize
-from PyQt5.QtGui import QFont, QPalette, QColor, QKeySequence
+from PyQt5.QtCore import Qt, QSize, QPoint, QTimer
+from PyQt5.QtGui import QFont, QPalette, QColor, QKeySequence, QIcon
+from PyQt5.QtCore import QPropertyAnimation, QSequentialAnimationGroup
 from question.loader import QuestionProcessor
 from time import time
 import random 
 from tts.tts_worker import TextToSpeech
-from PyQt5.QtCore import QTimer
 from PyQt5.QtMultimedia import QSound
 
 
@@ -262,6 +262,9 @@ class QuestionWidget(QWidget):
         else:
             self.tts = TextToSpeech()
         self._question_count = 0  # Track question number for TTS timing
+        self.is_bell_mode = (processor.questionType.lower() == "bellring")
+        self.bell_press_count = 0
+        self._active = True  # Guard flag for stale QTimer callbacks
         self.init_ui()
        
     def init_ui(self):
@@ -270,28 +273,46 @@ class QuestionWidget(QWidget):
         self.label.setProperty("class", "question-label")
         self.label.setWordWrap(True)
 
-        # ✅ Styled input box
-        # We modify the creation slightly to avoid conflicting placeholders
-        self.input_box = create_answer_input()
-        
-        # FIX: Remove visual placeholder to stop "double reading" (Label + Placeholder)
-        self.input_box.setPlaceholderText("") 
-        
-        self.input_box.returnPressed.connect(self.check_answer)
+        if self.is_bell_mode:
+            # ── Bell Ring Mode: button instead of text input ──
+            self.input_box = None  # Guard for code that references input_box
+
+            self.bell_button = QPushButton("")
+            self.bell_button.setIcon(QIcon("images/bell.png"))
+            self.bell_button.setIconSize(QSize(128, 128))
+            self.bell_button.setMinimumSize(150, 150)
+            self.bell_button.setFlat(True)
+            self.bell_button.setStyleSheet("border: none; background: transparent;")
+            self.bell_button.clicked.connect(self._on_bell_pressed)
+
+            # Pause-detection timer (single-shot, 1.5s)
+            self.bell_pause_timer = QTimer(self)
+            self.bell_pause_timer.setSingleShot(True)
+            self.bell_pause_timer.setInterval(1500)
+            self.bell_pause_timer.timeout.connect(self._evaluate_bell_answer)
+        else:
+            # ── Standard Mode: text input ──
+            self.bell_button = None
+            self.bell_pause_timer = None
+
+            self.input_box = create_answer_input()
+            # FIX: Remove visual placeholder to stop "double reading" (Label + Placeholder)
+            self.input_box.setPlaceholderText("")
+            self.input_box.returnPressed.connect(self.check_answer)
 
         self.result_label = QLabel("")
         self.result_label.setAlignment(Qt.AlignCenter)
         self.result_label.setFont(QFont("Arial", 46))
-        # ✅ ACCESSIBILITY: Screen reader will read dynamic feedback
-        # self.result_label.setAccessibleName("")
-        # self.result_label.setAccessibleDescription("Shows whether your answer was correct or wrong")
 
         # Assemble layout (no wrapper QWidget — prevents NVDA "grouping" announcement)
         self.layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
         self.layout.addWidget(self.label)
         self.layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
         self.layout.addSpacing(20)
-        self.layout.addWidget(self.input_box, alignment=Qt.AlignCenter)
+        if self.is_bell_mode:
+            self.layout.addWidget(self.bell_button, alignment=Qt.AlignCenter)
+        else:
+            self.layout.addWidget(self.input_box, alignment=Qt.AlignCenter)
         self.layout.addSpacing(10)
         self.layout.addWidget(self.result_label)
         self.layout.addStretch()
@@ -337,29 +358,44 @@ class QuestionWidget(QWidget):
     def set_input_focus(self):
         # FIX: Only set focus if we actually LOST it.
         # Forcing focus on an already focused element causes screen readers to re-announce.
-        if not self.input_box.hasFocus():
-            self.input_box.setFocus()
+        if self.is_bell_mode:
+            if self.bell_button and not self.bell_button.hasFocus():
+                self.bell_button.setFocus()
+        elif self.input_box:
+            if not self.input_box.hasFocus():
+                self.input_box.setFocus()
 
     def load_new_question(self):
         if hasattr(self, "gif_feedback_label"):
             self.hide_feedback_gif()
 
         question_text, self.answer = self.processor.get_questions()
+        self._active = True  # Re-enable for new question
         self.start_time = time()
 
         # Update Visuals
         self.label.setText(question_text)
-        
-        self.input_box.clear()
+
+        if self.input_box:
+            self.input_box.clear()
         self.result_label.setText("")
         self.show_feedback_gif("question")
+
+        # Reset bell press counter for new question
+        if self.is_bell_mode:
+            self.bell_press_count = 0
+            if self.bell_pause_timer and self.bell_pause_timer.isActive():
+                self.bell_pause_timer.stop()
         
         # --- TTS START ---
         app_tts_active = False
         if self.main_window and not self.main_window.is_muted:
             app_tts_active = True
         
+        print(f"[DEBUG] load_new_question type: '{self.processor.questionType}'")
+
         if self.processor.questionType.lower() == "bellring":
+            print("[BellRing] Mode detected. Suppressing standard TTS.")
             app_tts_active = False
 
         if app_tts_active:
@@ -372,22 +408,23 @@ class QuestionWidget(QWidget):
                 else:
                     # Subsequent questions: immediate TTS
                     self.tts.speak(tts_text)
+                    
+        # --- Bell Ring Question Audio ---
+        if self.processor.questionType.lower() == "bellring":
+             # Delay slightly to allow UI to settle if it's the first question, 
+             # matching the TTS delay logic above
+             delay = 500 if self._question_count == 0 else 100
+             print(f"[BellRing] Scheduling sequence for: {question_text}")
+             QTimer.singleShot(delay, lambda: self.play_bell_question_sequence(question_text))
 
-        # Defer focus to input field — needs a short delay so the widget
-        # is visible in the layout before focus can be set on it
-        QTimer.singleShot(100, lambda: self.input_box.setFocus(Qt.OtherFocusReason))
+        # Defer focus to the appropriate input widget
+        if self.is_bell_mode:
+            QTimer.singleShot(100, lambda: self.bell_button.setFocus(Qt.OtherFocusReason))
+        elif self.input_box:
+            QTimer.singleShot(100, lambda: self.input_box.setFocus(Qt.OtherFocusReason))
 
         self._question_count += 1
         # --- END ---
-
-        # Handle Bellring Logic
-        if self.processor.questionType.lower() == "bellring":
-            try:
-                count = int(float(self.answer))
-                if count > 0:
-                    self.play_bell_sounds(count)
-            except Exception as e:
-                print("[Bellring ERROR]", e)
 
    
     def play_bell_sounds(self, count):
@@ -399,8 +436,22 @@ class QuestionWidget(QWidget):
         self.bell_timer.start(700)
 
     def stop_all_activity(self):
+        self._active = False  # Prevent stale QTimer.singleShot callbacks
+
         if hasattr(self, "bell_timer") and self.bell_timer.isActive():
             self.bell_timer.stop()
+        
+        # Stop Bell Sequence Timer (Phase 1 & 3)
+        if hasattr(self, "bell_seq_timer") and self.bell_seq_timer.isActive():
+            self.bell_seq_timer.stop()
+            
+        # Stop Sequence Wait Timer (Phase 2 -> 3 transition)
+        if hasattr(self, "seq_timer") and self.seq_timer.isActive():
+            self.seq_timer.stop()
+
+        # Stop Bell Pause Timer (user answer pause detection)
+        if hasattr(self, "bell_pause_timer") and self.bell_pause_timer and self.bell_pause_timer.isActive():
+            self.bell_pause_timer.stop()
 
     def do_ring(self):
         if self.current_ring < self.total_rings:
@@ -411,6 +462,13 @@ class QuestionWidget(QWidget):
 
 
     def check_answer(self):
+            # ✅ Stop any ongoing bell sequences or audio immediately when user answers
+            self.stop_all_activity()
+            self._active = True  # Re-enable: user is answering, not navigating away
+
+            if not self.input_box:
+                return  # Bell mode uses _evaluate_bell_answer instead
+
             user_input = self.input_box.text().strip()
             elapsed = time() - self.start_time
 
@@ -495,10 +553,220 @@ class QuestionWidget(QWidget):
        
 
     def call_next_question(self):
+        if not self._active:
+            return
         if hasattr(self, "next_question_callback") and self.next_question_callback:
             self.next_question_callback()
         else:
             self.load_new_question()
+
+    # --- Bell Ring Sequence Logic ---
+    def play_bell_question_sequence(self, question_text):
+        if not self._active:
+            return
+        # Stop any existing sequence first
+        self.stop_all_activity()
+        self._active = True  # Re-enable after stop_all_activity sets it False
+
+        print(f"[BellRing] processing sequence for: '{question_text}'")
+
+        import re
+        # Parse "3 + 2" or "3 + 2 =" or "3 + 2 = ?"
+        match = re.search(r'(\d+)\s*([+\-*/×xX])\s*(\d+)', question_text)
+        
+        if not match:
+            print(f"[BellRing] Could not parse question for audio: '{question_text}' - Type: {self.processor.questionType}")
+            # Fallback to just reading it if parsing fails
+            if hasattr(self, 'tts') and self.tts: 
+                self.tts.speak(question_text)
+            return
+
+        num1 = int(match.group(1))
+        op_char = match.group(2)
+        num2 = int(match.group(3))
+
+        op_map = {
+            '+': "Addition",
+            '-': "Subtraction",
+            '*': "Multiplication",
+            '×': "Multiplication",
+            'x': "Multiplication",
+            'X': "Multiplication",
+            '/': "Division",
+            '÷': "Division"
+        }
+        self.seq_op_text = op_map.get(op_char, "Operation")
+        self.seq_num2 = num2
+
+        print(f"[BellRing] Parsed: {num1} {op_char} {num2} -> {self.seq_op_text}")
+
+        # Start Sequence: Phase 1 (First Operand Bells)
+        self.play_bells_with_callback(num1, self._seq_phase_2_speak_op)
+
+    def _seq_phase_2_speak_op(self):
+        if not self._active:
+            return
+        # Phase 2: Speak Operator
+        if hasattr(self, 'tts') and self.tts:
+            self.tts.speak(self.seq_op_text)
+        # Wait 1.5s for speech to finish, then Phase 3
+        self.seq_timer = QTimer(self)
+        self.seq_timer.setSingleShot(True)
+        self.seq_timer.timeout.connect(self._seq_phase_3_second_operand)
+        self.seq_timer.start(1500)
+
+    def _seq_phase_3_second_operand(self):
+        if not self._active:
+            return
+        # Phase 3: Second Operand Bells
+        self.play_bells_with_callback(self.seq_num2, self._seq_phase_4_done)
+
+    def _seq_phase_4_done(self):
+        if not self._active:
+            return
+        # Sequence complete — in bell mode, prompt user to ring their answer
+        if self.is_bell_mode:
+            if hasattr(self, 'tts') and self.tts and self.main_window and not self.main_window.is_muted:
+                QTimer.singleShot(300, lambda: self.tts.speak("Now ring your answer"))
+            # Focus the bell button after a short delay
+            QTimer.singleShot(500, lambda: self.bell_button.setFocus(Qt.OtherFocusReason))
+
+    def play_bells_with_callback(self, count, callback):
+        """Plays bell 'count' times, then calls 'callback'."""
+        
+        # Stop any existing bell sequence timer to prevent overlaps
+        if hasattr(self, "bell_seq_timer") and self.bell_seq_timer.isActive():
+            self.bell_seq_timer.stop()
+
+        if count <= 0:
+            if callback: callback()
+            return
+
+        self.bell_seq_counter = 0
+        self.bell_seq_total = count
+        self.bell_seq_callback = callback
+        
+        # Use a timer for the intervals
+        self.bell_seq_timer = QTimer(self)
+        self.bell_seq_timer.timeout.connect(self._on_bell_seq_tick)
+        self.bell_seq_timer.start(600) # 600ms gap between bells
+        
+        # Play first one immediately
+        self._on_bell_seq_tick() 
+
+    def _on_bell_seq_tick(self):
+        if self.bell_seq_counter < self.bell_seq_total:
+            if self.main_window:
+                self.main_window.play_sound("BellRing.mp3")
+            self.bell_seq_counter += 1
+        else:
+            self.bell_seq_timer.stop()
+            if self.bell_seq_callback:
+                self.bell_seq_callback()
+
+    # ── Bell Ring Mode: button press handling ──
+    def _on_bell_pressed(self):
+        """Called each time user clicks the Ring Bell button."""
+        self.bell_press_count += 1
+        print(f"[BellRing] Press #{self.bell_press_count}")
+        # Vibration animation
+        self._shake_bell()
+        # Play bell sound on each press
+        if self.main_window and not self.main_window.is_muted:
+            self.main_window.play_sound("BellRing.mp3")
+        # Restart pause timer on each press
+        if self.bell_pause_timer:
+            self.bell_pause_timer.stop()
+            self.bell_pause_timer.start(1500)
+
+    def _shake_bell(self):
+        """Subtle vibration animation on the bell button."""
+        if not self.bell_button:
+            return
+        origin = self.bell_button.pos()
+        anim_group = QSequentialAnimationGroup(self)
+
+        offsets = [4, -8, 6, -4, 2, 0]  # pixel offsets for shake
+        for dx in offsets:
+            anim = QPropertyAnimation(self.bell_button, b"pos")
+            anim.setDuration(35)
+            anim.setEndValue(QPoint(origin.x() + dx, origin.y()))
+            anim_group.addAnimation(anim)
+
+        anim_group.start()
+        # Keep a reference so it doesn't get garbage collected mid-animation
+        self._shake_anim = anim_group
+
+    def _evaluate_bell_answer(self):
+        """Called when the pause timer fires after the user stops pressing."""
+        count = self.bell_press_count
+        self.bell_press_count = 0  # Reset for next sequence
+
+        try:
+            correct_answer = int(self.answer)
+        except (ValueError, TypeError):
+            correct_answer = -1  # Safety fallback
+
+        elapsed = time() - self.start_time
+        is_correct = (count == correct_answer)
+
+        app_audio_active = self.main_window and not self.main_window.is_muted
+
+        print(f"[BellRing] Evaluating: pressed {count}, answer {correct_answer}, correct={is_correct}")
+
+        if is_correct:
+            if hasattr(self, 'tts'):
+                self.tts.stop()
+
+            # Feedback
+            sound_index = random.randint(1, 3)
+            if elapsed < 5: feedback_text = "🌟 Excellent"
+            elif elapsed < 10: feedback_text = "👏 Very Good"
+            elif elapsed < 15: feedback_text = "👍 Good"
+            elif elapsed < 20: feedback_text = "👌 Not Bad"
+            else: feedback_text = "🙂 Okay"
+
+            self.result_label.setText(f'<span style="font-size:16pt;">{feedback_text}</span>')
+            clean_feedback = feedback_text.replace("🌟", "").replace("👏", "").replace("👍", "").replace("👌", "").replace("🙂", "").strip()
+            self.result_label.setAccessibleName(f"Correct! {clean_feedback}")
+
+            if app_audio_active and self.main_window:
+                if elapsed < 5: sound_file = f"excellent-{sound_index}.mp3"
+                elif elapsed < 10: sound_file = f"very-good-{sound_index}.mp3"
+                elif elapsed < 15: sound_file = f"good-{sound_index}.mp3"
+                elif elapsed < 20: sound_file = f"not-bad-{sound_index}.mp3"
+                else: sound_file = f"okay-{sound_index}.mp3"
+
+                self.main_window.play_sound(sound_file)
+                self.show_feedback_gif(sound_file)
+
+                if hasattr(self, 'tts'):
+                    QTimer.singleShot(300, lambda t=clean_feedback: self.tts.speak(t))
+
+            self.processor.retry_count = 0
+            QTimer.singleShot(2000, self.call_next_question)
+
+        else:
+            self.processor.retry_count += 1
+            self.result_label.setText('<span style="font-size:16pt;">Try Again.</span>')
+            self.result_label.setAccessibleName("Incorrect. Try Again.")
+
+            if app_audio_active and self.main_window:
+                sound_index = random.randint(1, 2)
+                if self.processor.retry_count == 1:
+                    sound_file = f"wrong-anwser-{sound_index}.mp3"
+                else:
+                    sound_file = f"wrong-anwser-repeted-{sound_index}.mp3"
+
+                self.main_window.play_sound(sound_file)
+                self.show_feedback_gif(sound_file)
+
+                if hasattr(self, 'tts'):
+                    QTimer.singleShot(300, lambda: self.tts.speak("Try Again"))
+
+            # Keep focus on bell button for retry
+            if self.bell_button and not self.bell_button.hasFocus():
+                self.bell_button.setFocus()
 
 
 
@@ -510,6 +778,11 @@ def create_dynamic_question_ui(section_name, difficulty_index, back_callback,mai
     layout = QVBoxLayout()
     layout.setAlignment(Qt.AlignTop)
     container.setLayout(layout)
+
+    # ✅ Temporary: Force difficulty to 1 for Bell Ring mode
+    if section_name.lower() == "bellring":
+        print(f"[BellRing] Overriding difficulty {difficulty_index} -> 1")
+        difficulty_index = 1
 
     processor = QuestionProcessor(section_name, difficulty_index)
     processor.process_file()

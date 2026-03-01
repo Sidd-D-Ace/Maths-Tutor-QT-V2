@@ -1,4 +1,5 @@
-PyQt5
+PyQt5; sys_platform == "win32"
+PyQt5-sip; sys_platform == "win32"
 pyttsx3
 openpyxl
 pandas

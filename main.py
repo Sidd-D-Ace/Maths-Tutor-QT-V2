@@ -1,4 +1,5 @@
 import sys, os, subprocess
+from PyQt5 import sip
 
 # ── Accessibility: Enable the Qt5 ↔ AT-SPI bridge for Linux screen readers ──
 os.environ["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] = "1"
@@ -23,7 +24,7 @@ if sys.platform.startswith("linux"):
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QDialog, QVBoxLayout,
     QPushButton, QComboBox, QHBoxLayout, QCheckBox, QFrame,
-    QWidget, QGridLayout,QStackedWidget, QSizePolicy
+    QWidget, QGridLayout,QStackedWidget, QSizePolicy, QShortcut, QMessageBox
 )
 from PyQt5.QtCore import Qt,QUrl, QSize, QTimer
 from question.loader import QuestionProcessor
@@ -35,7 +36,7 @@ from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
 from language.language import get_saved_language, save_selected_language_to_file, tr, set_language
 
-from PyQt5.QtGui import QMovie, QPixmap
+from PyQt5.QtGui import QMovie, QKeySequence, QPixmap, QFont, QIcon
 
 
 class RootWindow(QDialog):
@@ -184,6 +185,15 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, 'tts'):
             self.tts.stop()
+        
+        # ✅ BUG FIX: Clear stale widget references before init_ui destroys old central widget
+        self.section_pages = {}
+        if hasattr(self, 'game_mode_container'):
+            del self.game_mode_container
+        if hasattr(self, '_quickplay_question_widget'):
+            del self._quickplay_question_widget
+        if hasattr(self, 'quickplay_container'):
+            del self.quickplay_container
         
         self.init_ui()
         
@@ -612,8 +622,10 @@ class MainWindow(QMainWindow):
 
         if name in self.section_pages:
             old_page = self.section_pages[name]
-            self.stack.removeWidget(old_page)
-            old_page.deleteLater()
+            if not sip.isdeleted(old_page):
+                self.stack.removeWidget(old_page)
+                old_page.deleteLater()
+            del self.section_pages[name]
 
         self.section_pages[name] = page
         self.stack.addWidget(page)
